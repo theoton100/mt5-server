@@ -9,7 +9,7 @@ ENV DISPLAY=:1
 RUN dpkg --add-architecture i386 \
     && apt-get update \
     && apt-get install -y \
-        wget curl cabextract \
+        wget curl cabextract unzip \
         xvfb x11vnc \
         novnc websockify \
         python3 python3-pip \
