@@ -41,6 +41,16 @@ if [ ! -f "$WINE_PYTHON" ]; then
     echo "[OK] Windows Python ready."
 fi
 
+# Always rewrite _pth with absolute Windows paths (fixes 'no module encodings' under Wine)
+# Must run every startup in case the volume already has python311 from a previous run
+cat > "$WINE_PY_DIR/python311._pth" << 'PTHEOF'
+C:\python311\python311.zip
+C:\python311
+C:\python311\Lib\site-packages
+import site
+PTHEOF
+echo "[OK] _pth configured with absolute paths."
+
 # ── Install MetaTrader5 + mt5linux (skip if already installed) ────────────────
 SITE_PKGS="$WINE_PY_DIR/Lib/site-packages"
 if [ ! -d "$SITE_PKGS/MetaTrader5" ] && [ ! -d "$SITE_PKGS/MetaTrader5-"* ] 2>/dev/null; then
