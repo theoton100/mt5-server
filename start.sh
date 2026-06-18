@@ -28,40 +28,25 @@ WINE_PYTHON="$WINE_PY_DIR/python.exe"
 if [ ! -f "$WINE_PYTHON" ]; then
     echo "[INIT] Downloading embeddable Python 3.11..."
     wget "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip" \
-         -O /tmp/pyembed.zip 2>&1 || { echo "[ERROR] Python download failed"; }
+         -O /tmp/pyembed.zip 2>&1 || echo "[ERROR] Python download failed"
     mkdir -p "$WINE_PY_DIR"
-    unzip /tmp/pyembed.zip -d "$WINE_PY_DIR" 2>&1 || { echo "[ERROR] unzip failed"; }
-    echo "[DEBUG] Contents of $WINE_PY_DIR:"
+    unzip /tmp/pyembed.zip -d "$WINE_PY_DIR" 2>&1 || echo "[ERROR] unzip failed"
+    echo "[DEBUG] python311 dir contents:"
     ls "$WINE_PY_DIR/" 2>/dev/null || echo "(empty)"
-    # Enable site-packages so pip packages are importable
-    PTH="$WINE_PY_DIR/python311._pth"
-    [ -f "$PTH" ] && sed -i 's/#import site/import site/' "$PTH" || echo "import site" >> "$PTH"
+
     # Bootstrap pip
     wget -q "https://bootstrap.pypa.io/get-pip.py" -O /tmp/get-pip.py
-    wine "$WINE_PYTHON" /tmp/get-pip.py --no-warn-script-location 2>/dev/null || true
+    wine "$WINE_PYTHON" /tmp/get-pip.py --no-warn-script-location 2>&1 \
+        | tee /config/logs/pip_bootstrap.log || true
     echo "[OK] Windows Python ready."
 fi
 
-# Write batch files that set PYTHONHOME in the Windows environment before running Python
-# (Setting PYTHONHOME as a Linux env var doesn't reliably translate through Wine)
-cat > "$WINEPREFIX/drive_c/run_pip.bat" << 'EOF'
-@echo off
-set PYTHONHOME=C:\python311
-set PYTHONPATH=C:\python311\python311.zip
-C:\python311\Scripts\pip.exe install MetaTrader5 mt5linux --no-warn-script-location
-EOF
-
-cat > "$WINEPREFIX/drive_c/run_bridge.bat" << 'EOF'
-@echo off
-set PYTHONHOME=C:\python311
-set PYTHONPATH=C:\python311\python311.zip;C:\python311\Lib\site-packages
-C:\python311\python.exe -c "from mt5linux import MetaTrader5; mt5 = MetaTrader5(); mt5.run_server(host='0.0.0.0', port=8001)"
-EOF
-
-# ── Install MetaTrader5 + mt5linux into Windows Python ────────────────────────
-if ! wine cmd.exe /c "C:\\check_mt5.bat" 2>/dev/null; then
+# ── Install MetaTrader5 + mt5linux (skip if already installed) ────────────────
+SITE_PKGS="$WINE_PY_DIR/Lib/site-packages"
+if [ ! -d "$SITE_PKGS/MetaTrader5" ] && [ ! -d "$SITE_PKGS/MetaTrader5-"* ] 2>/dev/null; then
     echo "[INIT] Installing MetaTrader5 + mt5linux..."
-    wine cmd.exe /c "C:\\run_pip.bat" 2>&1 | tee /config/logs/pip.log || true
+    wine "$WINE_PYTHON" -m pip install MetaTrader5 mt5linux \
+         --no-warn-script-location 2>&1 | tee /config/logs/pip.log || true
     echo "[OK] Packages installed."
 fi
 
@@ -91,9 +76,13 @@ else
     echo "[WARN] MT5 exe not found — skipping terminal launch."
 fi
 
-# ── Start mt5linux bridge via batch file (sets PYTHONHOME in Windows env) ─────
+# ── Start mt5linux bridge ─────────────────────────────────────────────────────
 echo "[START] Starting MT5 Python bridge on port 8001..."
-wine cmd.exe /c "C:\\run_bridge.bat" 2>&1 | tee /config/logs/bridge.log || true
+wine "$WINE_PYTHON" -c "
+from mt5linux import MetaTrader5
+mt5 = MetaTrader5()
+mt5.run_server(host='0.0.0.0', port=8001)
+" 2>&1 | tee /config/logs/bridge.log || true
 
 # ── Fallback: keep container alive so you can debug via VNC ──────────────────
 echo "[WARN] Bridge exited — container staying alive for debugging."
