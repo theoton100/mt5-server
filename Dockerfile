@@ -4,6 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV WINEPREFIX=/config/wine
 ENV WINEARCH=win64
 ENV DISPLAY=:1
+ENV BRIDGE_PORT=8001
 
 # Install Wine, VNC tools, Python, and utilities
 RUN dpkg --add-architecture i386 \
