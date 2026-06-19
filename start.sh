@@ -1,49 +1,58 @@
 #!/bin/bash
-# No set -e — we handle errors manually so the container never crashes
+set -u
 
 LOG=/config/logs/startup.log
+BRIDGE_LOG=/config/logs/bridge.log
+READY_LOG=/config/logs/mt5_ready_check.log
 BRIDGE_PORT="${BRIDGE_PORT:-8001}"
+
 mkdir -p /config/wine /config/logs
 exec > >(tee -a "$LOG") 2>&1
 
+export WINEPREFIX="${WINEPREFIX:-/config/wine}"
+export WINEARCH="${WINEARCH:-win64}"
+export DISPLAY=:1
+
 echo "=== MT5 Container Starting $(date) ==="
+echo "[INFO] WINEPREFIX=$WINEPREFIX"
+echo "[INFO] BRIDGE_PORT=$BRIDGE_PORT"
 
 # ── Virtual display ────────────────────────────────────────────────────────────
-Xvfb :1 -screen 0 1280x800x24 &
-export DISPLAY=:1
-sleep 3
+if ! pgrep -f "Xvfb :1" >/dev/null 2>&1; then
+    Xvfb :1 -screen 0 1280x800x24 &
+    sleep 3
+fi
 echo "[OK] Virtual display started."
 
 # ── Wine prefix init (first run only) ─────────────────────────────────────────
 if [ ! -f "$WINEPREFIX/system.reg" ]; then
-    echo "[INIT] Initializing Wine prefix (~2 min)..."
-    wineboot --init 2>/dev/null || true
+    echo "[INIT] Initializing Wine prefix..."
+    wineboot --init || true
     sleep 25
     echo "[OK] Wine initialized."
 fi
 
-# ── Windows Python (embeddable — no installer, just unzip) ────────────────────
+# ── Windows Python (embeddable) ───────────────────────────────────────────────
 WINE_PY_DIR="$WINEPREFIX/drive_c/python311"
 WINE_PYTHON="$WINE_PY_DIR/python.exe"
 
 if [ ! -f "$WINE_PYTHON" ]; then
     echo "[INIT] Downloading embeddable Python 3.11..."
     wget "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip" \
-         -O /tmp/pyembed.zip 2>&1 || echo "[ERROR] Python download failed"
+         -O /tmp/pyembed.zip
     mkdir -p "$WINE_PY_DIR"
-    unzip /tmp/pyembed.zip -d "$WINE_PY_DIR" 2>&1 || echo "[ERROR] unzip failed"
+    unzip -o /tmp/pyembed.zip -d "$WINE_PY_DIR"
     echo "[DEBUG] python311 dir contents:"
-    ls "$WINE_PY_DIR/" 2>/dev/null || echo "(empty)"
+    ls "$WINE_PY_DIR/" || true
 
-    # Bootstrap pip
+    echo "[INIT] Bootstrapping pip..."
     wget -q "https://bootstrap.pypa.io/get-pip.py" -O /tmp/get-pip.py
-    wine "$WINE_PYTHON" /tmp/get-pip.py --no-warn-script-location 2>&1 \
-        | tee /config/logs/pip_bootstrap.log || true
+    wine "$WINE_PYTHON" /tmp/get-pip.py --no-warn-script-location \
+        2>&1 | tee /config/logs/pip_bootstrap.log || true
     echo "[OK] Windows Python ready."
 fi
 
-# Always rewrite _pth with absolute Windows paths (fixes 'no module encodings' under Wine)
-# Must run every startup in case the volume already has python311 from a previous run
+# ── Fix embeddable Python path config ─────────────────────────────────────────
 cat > "$WINE_PY_DIR/python311._pth" << 'PTHEOF'
 C:\python311\python311.zip
 C:\python311
@@ -52,50 +61,122 @@ import site
 PTHEOF
 echo "[OK] _pth configured with absolute paths."
 
-# ── Install MetaTrader5 + mt5linux (skip if already installed) ────────────────
-if ! wine "$WINE_PYTHON" -c "import mt5linux" 2>/dev/null; then
+# ── Install Windows-side packages required by MT5 bridge ──────────────────────
+echo "[CHECK] Verifying Windows-side Python packages..."
+if ! wine "$WINE_PYTHON" -c "import MetaTrader5, mt5linux" >/dev/null 2>&1; then
     echo "[INIT] Installing MetaTrader5 + mt5linux..."
-    wine "$WINE_PYTHON" -m pip install MetaTrader5 mt5linux \
-         --no-warn-script-location 2>&1 | tee /config/logs/pip.log || true
-    echo "[OK] Packages installed."
+    wine "$WINE_PYTHON" -m pip install --upgrade pip --no-warn-script-location \
+        2>&1 | tee /config/logs/pip_upgrade.log || true
+    wine "$WINE_PYTHON" -m pip install --upgrade MetaTrader5 mt5linux rpyc pywin32 \
+        --no-warn-script-location 2>&1 | tee /config/logs/pip.log
+    echo "[OK] Windows-side packages installed."
+else
+    echo "[OK] Windows-side packages already present."
 fi
 
-# ── MetaTrader 5 terminal ──────────────────────────────────────────────────────
+# ── Install MT5 terminal if missing ────────────────────────────────────────────
 MT5_EXE="$WINEPREFIX/drive_c/Program Files/MetaTrader 5/terminal64.exe"
 if [ ! -f "$MT5_EXE" ]; then
     echo "[INIT] Downloading MT5 setup..."
     wget -q "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe" \
          -O /tmp/mt5setup.exe
-    echo "[INIT] Installing MT5 (~2 min)..."
-    wine /tmp/mt5setup.exe /auto 2>/dev/null || true
+    echo "[INIT] Installing MT5..."
+    wine /tmp/mt5setup.exe /auto || true
     sleep 90
     echo "[OK] MT5 installed."
 fi
 
-# ── VNC + noVNC ───────────────────────────────────────────────────────────────
-x11vnc -display :1 -forever -nopw -rfbport 5900 -bg -quiet 2>/dev/null || true
-websockify --web /usr/share/novnc/ 6080 localhost:5900 &
-echo "[OK] noVNC ready on port 6080."
-
-# ── Launch MT5 terminal ───────────────────────────────────────────────────────
-if [ -f "$MT5_EXE" ]; then
-    wine "$MT5_EXE" &
-    echo "[OK] MT5 terminal launched."
-    sleep 15
-else
-    echo "[WARN] MT5 exe not found — skipping terminal launch."
+# ── VNC + noVNC ────────────────────────────────────────────────────────────────
+if ! pgrep -f "x11vnc .*5900" >/dev/null 2>&1; then
+    x11vnc -display :1 -forever -nopw -rfbport 5900 -bg -quiet || true
 fi
 
-# ── Start mt5linux bridge ─────────────────────────────────────────────────────
+if ! pgrep -f "websockify .*6080" >/dev/null 2>&1; then
+    websockify --web /usr/share/novnc/ 6080 localhost:5900 &
+fi
+echo "[OK] noVNC ready on port 6080."
+
+# ── Launch MT5 terminal ────────────────────────────────────────────────────────
+echo "[START] Launching MT5 terminal..."
+wine "$MT5_EXE" >/config/logs/mt5_terminal.log 2>&1 &
+sleep 5
+echo "[OK] MT5 terminal launch command sent."
+
+# ── Wait for terminal process to appear ────────────────────────────────────────
+TERM_READY=0
+for i in $(seq 1 18); do
+    if pgrep -a -f "terminal64.exe" >/dev/null 2>&1; then
+        TERM_READY=1
+        echo "[OK] MT5 terminal process detected."
+        break
+    fi
+    echo "[WAIT] MT5 terminal process not visible yet, retry $i/18 ..."
+    sleep 5
+done
+
+if [ "$TERM_READY" -ne 1 ]; then
+    echo "[ERROR] MT5 terminal process never appeared."
+    echo "[ERROR] Check /config/logs/mt5_terminal.log"
+    exit 1
+fi
+
+# ── Wait for MetaTrader5 Python API readiness ─────────────────────────────────
+echo "[WAIT] Waiting for MetaTrader5 Python API to become ready..."
+READY=0
+: > "$READY_LOG"
+
+for i in $(seq 1 30); do
+    wine "$WINE_PYTHON" -c "
+import sys
+import MetaTrader5 as mt5
+
+ok = mt5.initialize()
+print('initialize=', ok)
+
+if ok:
+    info = mt5.terminal_info()
+    print('terminal_info=', info)
+    ver = mt5.version()
+    print('version=', ver)
+    mt5.shutdown()
+    sys.exit(0)
+
+print('last_error=', mt5.last_error())
+sys.exit(1)
+" >> "$READY_LOG" 2>&1
+
+    if [ $? -eq 0 ]; then
+        READY=1
+        echo "[OK] MetaTrader5 Python API is ready."
+        break
+    fi
+
+    echo "[WAIT] MT5 API not ready yet, retry $i/30 ..."
+    sleep 10
+done
+
+if [ "$READY" -ne 1 ]; then
+    echo "[ERROR] MetaTrader5 never became ready."
+    echo "[ERROR] Dumping $READY_LOG"
+    cat "$READY_LOG" || true
+    exit 1
+fi
+
+# ── Start mt5linux bridge ──────────────────────────────────────────────────────
 echo "[START] Starting MT5 Python bridge on port ${BRIDGE_PORT}..."
+: > "$BRIDGE_LOG"
+
 wine "$WINE_PYTHON" -c "
 import os
 from mt5linux import MetaTrader5
+
 port = int(os.environ.get('BRIDGE_PORT', '8001'))
 mt5 = MetaTrader5()
 mt5.run_server(host='0.0.0.0', port=port)
-" 2>&1 | tee /config/logs/bridge.log || true
+" 2>&1 | tee -a "$BRIDGE_LOG"
 
-# ── Fallback: keep container alive so you can debug via VNC ──────────────────
-echo "[WARN] Bridge exited — container staying alive for debugging."
-tail -f /config/logs/startup.log
+BRIDGE_EXIT=$?
+echo "[ERROR] Bridge exited unexpectedly with code $BRIDGE_EXIT"
+echo "[ERROR] Dumping $BRIDGE_LOG"
+cat "$BRIDGE_LOG" || true
+exit $BRIDGE_EXIT
