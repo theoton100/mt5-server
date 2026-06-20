@@ -268,8 +268,12 @@ echo "[WAIT] Waiting for MetaTrader5 Python API to become ready..."
 READY=0
 : > "$READY_LOG"
 
+echo "[INFO] MT5_LOGIN=${MT5_LOGIN:-unset}" >> "$READY_LOG"
+echo "[INFO] MT5_SERVER=${MT5_SERVER:-unset}" >> "$READY_LOG"
+echo "[INFO] MT5_PASSWORD_SET=$([ -n "${MT5_PASSWORD:-}" ] && echo yes || echo no)" >> "$READY_LOG"
+
 for i in $(seq 1 30); do
-    run_wine 120 "$WINE_BIN" "$WINE_PYTHON" -c "
+    if run_wine 45 "$WINE_BIN" "$WINE_PYTHON" -c "
 import sys
 import MetaTrader5 as mt5
 
@@ -285,8 +289,7 @@ if ok:
 print('last_error=', mt5.last_error())
 sys.exit(1)
 " >> "$READY_LOG" 2>&1
-
-    if [ $? -eq 0 ]; then
+    then
         READY=1
         echo "[OK] MetaTrader5 Python API is ready."
         break
