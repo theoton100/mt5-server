@@ -35,6 +35,13 @@ is_wine_python_package_installed() {
 
 mkdir -p /config
 
+# Route heavy temp writes + Wine sockets onto the /config volume, not the tiny
+# ephemeral container layer (which fills up and causes "No space left on device").
+export TMPDIR=/config/tmp
+export XDG_RUNTIME_DIR=/config/run
+mkdir -p "$TMPDIR" "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+
 # ── Virtual display (headless, no VNC) ────────────────────────────────────────
 if ! pgrep -f "Xvfb $DISPLAY" >/dev/null 2>&1; then
     Xvfb "$DISPLAY" -screen 0 1280x800x24 &
@@ -53,9 +60,9 @@ log "[0/7] Wine prefix ready."
 # ── [1/7] Wine Mono ───────────────────────────────────────────────────────────
 if [ ! -e "$WINEPREFIX/drive_c/windows/mono" ]; then
     log "[1/7] Installing Wine Mono..."
-    curl -L -o /tmp/mono.msi "$mono_url"
-    WINEDLLOVERRIDES=mscoree=d $wine_executable msiexec /i /tmp/mono.msi /qn
-    rm -f /tmp/mono.msi
+    curl -L -o "$TMPDIR/mono.msi" "$mono_url"
+    WINEDLLOVERRIDES=mscoree=d $wine_executable msiexec /i "$TMPDIR/mono.msi" /qn
+    rm -f "$TMPDIR/mono.msi"
 else
     log "[1/7] Wine Mono already present."
 fi
@@ -86,9 +93,9 @@ fi
 # ── [5/7] Windows-side Python ─────────────────────────────────────────────────
 if ! $wine_executable python --version 2>/dev/null; then
     log "[5/7] Installing Python in Wine..."
-    curl -L "$python_url" -o /tmp/python-installer.exe
-    $wine_executable /tmp/python-installer.exe /quiet InstallAllUsers=1 PrependPath=1
-    rm -f /tmp/python-installer.exe
+    curl -L "$python_url" -o "$TMPDIR/python-installer.exe"
+    $wine_executable "$TMPDIR/python-installer.exe" /quiet InstallAllUsers=1 PrependPath=1
+    rm -f "$TMPDIR/python-installer.exe"
 else
     log "[5/7] Python already installed in Wine."
 fi
